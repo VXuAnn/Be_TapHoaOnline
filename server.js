@@ -9,6 +9,8 @@ const { OAuth2Client } = require('google-auth-library');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
 process.on('uncaughtException', (err) => {
     console.error('💥 UNCAUGHT EXCEPTION:', err);
@@ -25,16 +27,26 @@ if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir);
 }
 
-// Cấu hình Multer
-const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, 'uploads/');
-    },
-    filename: function (req, file, cb) {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, uniqueSuffix + path.extname(file.originalname));
-    }
+// Cấu hình Cloudinary
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
 });
+
+// Cấu hình Cloudinary Storage cho Multer
+const storage = new CloudinaryStorage({
+    cloudinary: cloudinary,
+    params: {
+        folder: 'taphoa_mobile', // Tên thư mục trên Cloudinary
+        allowed_formats: ['jpg', 'png', 'jpeg', 'webp'],
+        public_id: (req, file) => {
+            const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+            return uniqueSuffix;
+        }
+    },
+});
+
 const upload = multer({ storage: storage });
 
 // Thay đổi CLIENT_ID này bằng WEB CLIENT ID của bạn từ Google Cloud Console
@@ -753,7 +765,8 @@ app.post('/api/products', async (req, res) => {
 app.post('/api/upload', upload.array('images', 10), (req, res) => {
     try {
         const fileUrls = req.files.map(file => {
-            return `http://localhost:${port}/uploads/${file.filename}`;
+            // Cloudinary trả về URL trong trường path
+            return file.path;
         });
         res.json({ urls: fileUrls });
     } catch (error) {
