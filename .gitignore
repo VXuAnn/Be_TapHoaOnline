@@ -1,0 +1,6 @@
+node_modules/
+.env
+uploads/
+*.log
+*.sql
+init_db.sql
