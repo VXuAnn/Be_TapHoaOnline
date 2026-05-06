@@ -1625,6 +1625,13 @@ app.patch('/api/addresses/:id/set-default', authenticateToken, async (req, res) 
 // 1. Lấy danh sách thông báo của user
 app.get('/api/notifications', authenticateToken, async (req, res) => {
     try {
+        // Kiểm tra nhanh xem bảng tồn tại không để tránh treo query
+        const tableCheck = await pool.query("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'notifications')");
+        if (!tableCheck.rows[0].exists) {
+            console.log('⚠️ Bảng notifications chưa tồn tại, đang trả về danh sách rỗng.');
+            return res.json([]);
+        }
+
         const result = await pool.query(
             'SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50',
             [req.user.id]
@@ -1632,7 +1639,8 @@ app.get('/api/notifications', authenticateToken, async (req, res) => {
         res.json(result.rows);
     } catch (err) {
         console.error('Lỗi lấy thông báo:', err.message);
-        res.status(500).json({ error: 'Lỗi server' });
+        // Trả về mảng rỗng để App không bị lỗi hoặc timeout
+        res.json([]);
     }
 });
 
