@@ -433,13 +433,25 @@ app.post('/api/admin/orders/:id/approve', async (req, res) => {
             RETURNING *;
         `, [assignedShipperId, id]);
 
+        const order = result.rows[0];
         // Lấy tên shipper để trả về
         const shipperInfo = await pool.query('SELECT full_name FROM users WHERE id = $1', [assignedShipperId]);
         const shipperName = shipperInfo.rows[0]?.full_name || 'Không rõ';
 
+        // Thông báo cho khách hàng
+        if (order.user_id) {
+            await createNotification(
+                order.user_id,
+                'Đơn hàng đã được xác nhận! ✅',
+                `Đơn hàng #${order.order_code} của bạn đã được duyệt và đang chuẩn bị giao.`,
+                'order',
+                order.id
+            );
+        }
+
         res.json({
             message: `Đã duyệt đơn và giao cho shipper: ${shipperName}`,
-            order: result.rows[0],
+            order: order,
             shipper_name: shipperName
         });
     } catch (err) {
@@ -452,7 +464,7 @@ app.post('/api/admin/orders/:id/approve', async (req, res) => {
 app.post('/api/admin/orders/approve-all', async (req, res) => {
     try {
         // Lấy tất cả đơn pending
-        const pendingOrders = await pool.query("SELECT id FROM orders WHERE order_status = 'pending' ORDER BY created_at ASC");
+        const pendingOrders = await pool.query("SELECT id, user_id, order_code FROM orders WHERE order_status = 'pending' ORDER BY created_at ASC");
         if (pendingOrders.rows.length === 0) {
             return res.json({ message: 'Không có đơn hàng nào cần duyệt', approved: 0 });
         }
@@ -465,6 +477,7 @@ app.post('/api/admin/orders/approve-all', async (req, res) => {
 
         let approvedCount = 0;
         for (let i = 0; i < pendingOrders.rows.length; i++) {
+            const order = pendingOrders.rows[i];
             // Round-robin: phân đều cho các shipper
             const shipperIndex = i % shippers.rows.length;
             const shipperId = shippers.rows[shipperIndex].id;
@@ -473,7 +486,18 @@ app.post('/api/admin/orders/approve-all', async (req, res) => {
                 UPDATE orders 
                 SET order_status = 'confirmed', shipper_id = $1, assigned_at = NOW(), updated_at = NOW()
                 WHERE id = $2;
-            `, [shipperId, pendingOrders.rows[i].id]);
+            `, [shipperId, order.id]);
+
+            // Thông báo cho khách hàng
+            if (order.user_id) {
+                await createNotification(
+                    order.user_id,
+                    'Đơn hàng đã được xác nhận! ✅',
+                    `Đơn hàng #${order.order_code} của bạn đã được duyệt và đang chuẩn bị giao.`,
+                    'order',
+                    order.id
+                );
+            }
             approvedCount++;
         }
 
@@ -1320,6 +1344,16 @@ app.post('/api/orders/:id/cancel', async (req, res) => {
         }
 
         console.log(`🚫 [POST /api/orders/${id}/cancel] User ${userId} cancelled order. Reason: ${cancel_reason}`);
+        
+        // Thông báo xác nhận cho người dùng
+        await createNotification(
+            userId,
+            'Hủy đơn hàng thành công 🚫',
+            `Đơn hàng #${order.order_code} của bạn đã được hủy theo yêu cầu.`,
+            'order',
+            id
+        );
+
         res.json({ message: 'Đã hủy đơn hàng thành công' });
     } catch (err) {
         console.error('❌ [POST /api/orders/cancel] Error:', err.message);
@@ -1413,14 +1447,15 @@ app.put('/api/admin/orders/:id/status', async (req, res) => {
         const orderInfo = await pool.query('SELECT user_id, order_code FROM orders WHERE id = $1', [id]);
         if (orderInfo.rows.length > 0 && orderInfo.rows[0].user_id) {
             let statusText = '';
-            switch(order_status) {
+            switch (order_status) {
                 case 'confirmed': statusText = 'đã được xác nhận'; break;
-                case 'shipping': statusText = 'đang được giao'; break;
-                case 'completed': statusText = 'đã hoàn thành'; break;
+                case 'shipping': statusText = 'đang được giao đến bạn'; break;
+                case 'delivered': statusText = 'đã được giao thành công. Chúc bạn ngon miệng! 🍽️'; break;
                 case 'cancelled': statusText = 'đã bị hủy'; break;
+                case 'failed': statusText = 'giao hàng không thành công'; break;
                 default: statusText = 'đã thay đổi trạng thái';
             }
-            
+
             await createNotification(
                 orderInfo.rows[0].user_id,
                 'Cập nhật đơn hàng 📦',
@@ -1631,7 +1666,7 @@ app.put('/api/notifications/read-all', authenticateToken, async (req, res) => {
 // 4. Gửi thông báo Sale hàng loạt (Chỉ Admin)
 app.post('/api/notifications/broadcast', authenticateToken, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Không có quyền' });
-    
+
     const { title, body } = req.body;
     try {
         const users = await pool.query('SELECT id FROM users WHERE role = $1', ['user']);
@@ -1680,7 +1715,28 @@ app.post('/api/marketing/discount/products', async (req, res) => {
         const result = await pool.query(query, [discountPercent, productIds]);
 
         await pool.query('COMMIT');
-        console.log(`Cập nhật thành công ${result.rowCount} sản phẩm.`);
+        console.log(`[Marketing] ✅ Cập nhật giá thành công cho ${result.rowCount} sản phẩm.`);
+
+        // Gửi thông báo cho tất cả khách hàng (không phải admin/shipper)
+        if (discountPercent > 0) {
+            try {
+                const usersResult = await pool.query("SELECT id FROM users WHERE role NOT IN ('admin', 'shipper')");
+                console.log(`[Marketing] 📢 Đang gửi thông báo Sale cho ${usersResult.rowCount} khách hàng...`);
+                
+                for (const user of usersResult.rows) {
+                    await createNotification(
+                        user.id,
+                        'Siêu Sale Đổ Bộ! 🔥',
+                        `Nhiều sản phẩm bạn yêu thích vừa được giảm giá ${discountPercent}%. Mua ngay kẻo lỡ!`,
+                        'sale'
+                    );
+                }
+                console.log(`[Marketing] ✅ Đã gửi xong thông báo Sale.`);
+            } catch (notifyErr) {
+                console.error('[Marketing] ❌ Lỗi gửi thông báo hàng loạt:', notifyErr.message);
+            }
+        }
+
         res.json({ message: `Đã cập nhật giảm giá cho ${result.rowCount} sản phẩm`, count: result.rowCount });
     } catch (err) {
         await pool.query('ROLLBACK');
@@ -1713,7 +1769,28 @@ app.post('/api/marketing/discount/categories', async (req, res) => {
         const result = await pool.query(query, [discountPercent, subCategoryIds]);
 
         await pool.query('COMMIT');
-        console.log(`Cập nhật thành công ${result.rowCount} sản phẩm từ danh mục.`);
+        console.log(`[Marketing] ✅ Cập nhật giá theo danh mục thành công cho ${result.rowCount} sản phẩm.`);
+
+        // Gửi thông báo cho tất cả khách hàng (không phải admin/shipper)
+        if (discountPercent > 0) {
+            try {
+                const usersResult = await pool.query("SELECT id FROM users WHERE role NOT IN ('admin', 'shipper')");
+                console.log(`[Marketing] 📢 Đang gửi thông báo Sale danh mục cho ${usersResult.rowCount} khách hàng...`);
+                
+                for (const user of usersResult.rows) {
+                    await createNotification(
+                        user.id,
+                        'Khuyến Mãi Theo Danh Mục! 🏷️',
+                        `Danh mục sản phẩm bạn quan tâm vừa giảm giá ${discountPercent}%. Khám phá ngay!`,
+                        'sale'
+                    );
+                }
+                console.log(`[Marketing] ✅ Đã gửi xong thông báo Sale.`);
+            } catch (notifyErr) {
+                console.error('[Marketing] ❌ Lỗi gửi thông báo danh mục:', notifyErr.message);
+            }
+        }
+
         res.json({ message: `Đã cập nhật giảm giá cho ${result.rowCount} sản phẩm trong danh mục`, count: result.rowCount });
     } catch (err) {
         await pool.query('ROLLBACK');
@@ -1814,8 +1891,8 @@ app.get('/api/admin/stats/revenue', async (req, res) => {
             FROM orders GROUP BY order_status
         `);
 
-        // Số lượng user
-        const userCount = await pool.query("SELECT COUNT(*) as total FROM users WHERE role = 'customer'");
+        // Số lượng user (Khách hàng)
+        const userCount = await pool.query("SELECT COUNT(*) as total FROM users WHERE role NOT IN ('admin', 'shipper')");
 
         const revenue = parseFloat(actualResult.rows[0].total || 0);
         const cost = parseFloat(costResult.rows[0].total_cost || 0);
@@ -1882,7 +1959,19 @@ app.get('/api/admin/stats/revenue', async (req, res) => {
                 created_at TIMESTAMP DEFAULT NOW()
             );
         `);
-        console.log('✅ Shipper, Stock & Chat tables migration completed');
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS notifications (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id),
+                title VARCHAR(200),
+                body TEXT,
+                type VARCHAR(50),
+                related_id INTEGER,
+                is_read BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        `);
+        console.log('✅ Shipper, Stock, Chat & Notification tables migration completed');
     } catch (e) {
         console.log('ℹ : Migration skipped (already exists or error):', e.message);
     }
@@ -2046,7 +2135,20 @@ app.put('/api/shipper/orders/:orderId/pickup', async (req, res) => {
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Không tìm thấy đơn hàng hoặc bạn không có quyền gán đơn này' });
         }
-        res.json({ message: 'Xác nhận lấy hàng thành công', order: result.rows[0] });
+
+        const order = result.rows[0];
+        // Thông báo cho khách hàng
+        if (order.user_id) {
+            await createNotification(
+                order.user_id,
+                'Đơn hàng đang đến! 🚚',
+                `Đơn hàng #${order.order_code} đã được Shipper lấy và đang trên đường giao đến bạn.`,
+                'order',
+                order.id
+            );
+        }
+
+        res.json({ message: 'Xác nhận lấy hàng thành công', order: order });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
