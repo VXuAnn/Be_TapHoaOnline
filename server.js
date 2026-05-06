@@ -1087,11 +1087,12 @@ app.post('/api/orders', async (req, res) => {
         const order = orderResult.rows[0];
 
         // Lưu chi tiết đơn hàng và cập nhật số lượng kho
+        let firstItemImageUrl = null;
         if (items && items.length > 0) {
             for (const item of items) {
                 // 1. Kiểm tra tồn kho trước khi trừ
                 const productCheck = await pool.query(
-                    'SELECT name, stock_quantity FROM products WHERE id = $1 FOR UPDATE',
+                    'SELECT name, stock_quantity, image_url FROM products WHERE id = $1 FOR UPDATE',
                     [item.product_id]
                 );
 
@@ -1114,6 +1115,11 @@ app.post('/api/orders', async (req, res) => {
                     [order.id, item.product_id, item.product_name, item.product_price, item.quantity]
                 );
 
+                // Lưu ảnh sản phẩm đầu tiên để thông báo
+                if (!firstItemImageUrl && productCheck.rows[0].image_url) {
+                    firstItemImageUrl = productCheck.rows[0].image_url;
+                }
+
                 // 3. Trừ số lượng tồn kho và tăng số lượng đã bán
                 await pool.query(
                     'UPDATE products SET stock_quantity = stock_quantity - $1, sold_quantity = sold_quantity + $1 WHERE id = $2',
@@ -1126,31 +1132,15 @@ app.post('/api/orders', async (req, res) => {
 
         // Tạo thông báo cho người dùng
         if (userId) {
-            let firstItemImage = null;
-            try {
-                const imgRes = await pool.query(`
-                    SELECT p.image_url 
-                    FROM order_items oi 
-                    JOIN products p ON oi.product_id = p.id 
-                    WHERE oi.order_id = $1 
-                    LIMIT 1
-                `, [order.id]);
-                if (imgRes.rows.length > 0) {
-                    firstItemImage = imgRes.rows[0].image_url;
-                }
-                console.log(`[Order Notification] Order ID: ${order.id}, Image: ${firstItemImage}`);
-            } catch (imgErr) {
-                console.error('[Order Notification Error] Failed to get product image:', imgErr.message);
-            }
-
             await createNotification(
                 userId,
                 'Đặt hàng thành công! 🎉',
                 `Đơn hàng #${orderCode} của bạn đã được tiếp nhận. Tổng tiền: ${total_amount.toLocaleString()}đ`,
                 'order',
                 order.id,
-                firstItemImage
+                firstItemImageUrl
             );
+            console.log(`[Order Notification] Order ID: ${order.id}, Image captured: ${firstItemImageUrl}`);
         }
 
         res.status(201).json(order);
@@ -1365,8 +1355,21 @@ app.post('/api/orders/:id/cancel', async (req, res) => {
         
         // Thông báo xác nhận cho người dùng
         let cancelOrderImage = null;
-        const cancelImgRes = await pool.query('SELECT p.image_url FROM order_items oi JOIN products p ON oi.product_id = p.id WHERE oi.order_id = $1 LIMIT 1', [id]);
-        if (cancelImgRes.rows.length > 0) cancelOrderImage = cancelImgRes.rows[0].image_url;
+        try {
+            const cancelImgRes = await pool.query(`
+                SELECT p.image_url 
+                FROM order_items oi 
+                JOIN products p ON oi.product_id = p.id 
+                WHERE oi.order_id = $1 
+                LIMIT 1
+            `, [id]);
+            if (cancelImgRes.rows.length > 0) {
+                cancelOrderImage = cancelImgRes.rows[0].image_url;
+            }
+            console.log(`[Order Cancel Notification] Order ID: ${id}, Image: ${cancelOrderImage}`);
+        } catch (imgErr) {
+            console.error('[Order Cancel Notification Error] Failed to get product image:', imgErr.message);
+        }
 
         await createNotification(
             userId,
