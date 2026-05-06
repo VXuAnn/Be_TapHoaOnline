@@ -13,11 +13,11 @@ const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
 process.on('uncaughtException', (err) => {
-    console.error('💥 UNCAUGHT EXCEPTION:', err);
+    console.error('UNCAUGHT EXCEPTION:', err);
     process.exit(1);
 });
 process.on('unhandledRejection', (reason, promise) => {
-    console.error('💥 UNHANDLED REJECTION at:', promise, 'reason:', reason);
+    console.error('UNHANDLED REJECTION at:', promise, 'reason:', reason);
     process.exit(1);
 });
 
@@ -79,13 +79,16 @@ const pool = new Pool({
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
+    ssl: {
+        rejectUnauthorized: false
+    }
 });
 
 pool.connect((err, client, release) => {
     if (err) {
         return console.error('Error acquiring client', err.stack);
     }
-    console.log('Database connected successfully!');
+    console.log(`✅ Đã kết nối Database tại: ${process.env.DB_HOST}`);
     release();
 });
 
@@ -177,7 +180,7 @@ app.post('/api/google-login', async (req, res) => {
     const { idToken } = req.body;
     console.log('--------------------------------------------------');
     console.log('[Google Login] 📥 Nhận yêu cầu đăng nhập Google');
-    
+
     if (!idToken) {
         console.error('[Google Login] ❌ Lỗi: Không tìm thấy ID Token trong request body');
         return res.status(400).json({ error: 'Không tìm thấy Google ID Token' });
@@ -186,7 +189,7 @@ app.post('/api/google-login', async (req, res) => {
     try {
         console.log('[Google Login] 🔍 Đang xác thực ID Token với Google...');
         console.log(`[Google Login] 🎯 Audience mong đợi: ${GOOGLE_CLIENT_ID}`);
-        
+
         // Verify token với Google
         const ticket = await client.verifyIdToken({
             idToken: idToken,
@@ -258,7 +261,7 @@ app.post('/api/google-login', async (req, res) => {
             console.error(`[Google Login] GỢI Ý: Kiểm tra xem Client ID trên Backend (${GOOGLE_CLIENT_ID}) đã khớp với Client ID trên Google Cloud Console chưa.`);
         }
         console.error('--------------------------------------------------');
-        
+
         res.status(401).json({ error: `Xác thực Google thất bại: ${err.message}` });
     }
 });
@@ -318,8 +321,8 @@ app.get('/api/shipper/orders', async (req, res) => {
 // Cập nhật trạng thái đơn hàng (Shipper)
 app.put('/api/shipper/orders/:id/status', async (req, res) => {
     const { id } = req.params;
-    const { status, proof_image, failed_reason } = req.body; 
-    
+    const { status, proof_image, failed_reason } = req.body;
+
     try {
         let query = `
             UPDATE orders 
@@ -330,7 +333,7 @@ app.put('/api/shipper/orders/:id/status', async (req, res) => {
         let values = [status, id];
 
         if (proof_image) {
-             query = `
+            query = `
                 UPDATE orders 
                 SET order_status = $1, delivery_proof = $2, updated_at = NOW()
                 WHERE id = $3
@@ -338,7 +341,7 @@ app.put('/api/shipper/orders/:id/status', async (req, res) => {
             `;
             values = [status, proof_image, id];
         } else if (failed_reason) {
-             query = `
+            query = `
                 UPDATE orders 
                 SET order_status = $1, failed_reason = $2, updated_at = NOW()
                 WHERE id = $3
@@ -348,7 +351,7 @@ app.put('/api/shipper/orders/:id/status', async (req, res) => {
         }
 
         const result = await pool.query(query, values);
-        
+
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Không tìm thấy đơn hàng' });
         }
@@ -367,14 +370,14 @@ app.put('/api/shipper/orders/:id/status', async (req, res) => {
 app.get('/api/admin/shippers', async (req, res) => {
     try {
         const result = await pool.query(`
-            SELECT u.id, u.full_name, u.email,
+            SELECT u.id, u.full_name, u.email, u.is_online,
                 (SELECT COUNT(*) FROM orders WHERE shipper_id = u.id AND order_status IN ('confirmed', 'shipping')) as active_orders,
                 (SELECT COUNT(*) FROM orders WHERE shipper_id = u.id AND order_status = 'delivered') as delivered_orders,
                 (SELECT COUNT(*) FROM orders WHERE shipper_id = u.id AND order_status = 'failed') as failed_orders,
                 (SELECT COALESCE(SUM(CAST(total_amount AS NUMERIC)), 0) FROM orders WHERE shipper_id = u.id AND order_status = 'shipping' AND payment_method = 'COD') as cod_holding
             FROM users u 
             WHERE u.role = 'shipper'
-            ORDER BY u.full_name;
+            ORDER BY u.is_online DESC, u.full_name;
         `);
         res.json(result.rows);
     } catch (err) {
@@ -400,19 +403,24 @@ app.post('/api/admin/orders/:id/approve', async (req, res) => {
 
         let assignedShipperId = shipper_id;
 
-        // Nếu không chỉ định shipper → Tự động chọn shipper có ít đơn nhất (Load Balancing)
-        if (!assignedShipperId) {
+        if (assignedShipperId) {
+            // Kiểm tra shipper này có online không
+            const sCheck = await pool.query('SELECT is_online FROM users WHERE id = $1 AND role = \'shipper\'', [assignedShipperId]);
+            if (sCheck.rows.length === 0) return res.status(404).json({ error: 'Không tìm thấy shipper' });
+            if (!sCheck.rows[0].is_online) return res.status(400).json({ error: 'Tài xế này đang Offline, không thể gán đơn!' });
+        } else {
+            // Tự động tìm shipper online và có ít đơn nhất (Load Balancing)
             const shipperResult = await pool.query(`
                 SELECT u.id, u.full_name,
                     (SELECT COUNT(*) FROM orders WHERE shipper_id = u.id AND order_status IN ('confirmed', 'shipping')) as active_count
                 FROM users u
-                WHERE u.role = 'shipper'
+                WHERE u.role = 'shipper' AND u.is_online = true
                 ORDER BY active_count ASC, u.id ASC
                 LIMIT 1;
             `);
 
             if (shipperResult.rows.length === 0) {
-                return res.status(400).json({ error: 'Không có shipper nào trong hệ thống. Hãy tạo tài khoản shipper trước.' });
+                return res.status(400).json({ error: 'Hiện tại không có tài xế nào đang Online để gán đơn!' });
             }
             assignedShipperId = shipperResult.rows[0].id;
         }
@@ -429,8 +437,8 @@ app.post('/api/admin/orders/:id/approve', async (req, res) => {
         const shipperInfo = await pool.query('SELECT full_name FROM users WHERE id = $1', [assignedShipperId]);
         const shipperName = shipperInfo.rows[0]?.full_name || 'Không rõ';
 
-        res.json({ 
-            message: `Đã duyệt đơn và giao cho shipper: ${shipperName}`, 
+        res.json({
+            message: `Đã duyệt đơn và giao cho shipper: ${shipperName}`,
             order: result.rows[0],
             shipper_name: shipperName
         });
@@ -888,7 +896,7 @@ app.put('/api/profile/:id', async (req, res) => {
 
         const result = await pool.query(query, values);
         if (result.rows.length === 0) return res.status(404).json({ error: 'Không tìm thấy tài khoản' });
-        
+
         const user = result.rows[0];
         res.json({
             message: 'Cập nhật thành công',
@@ -1048,17 +1056,17 @@ app.post('/api/orders', async (req, res) => {
                     'SELECT name, stock_quantity FROM products WHERE id = $1 FOR UPDATE',
                     [item.product_id]
                 );
-                
+
                 if (productCheck.rows.length === 0) {
                     throw new Error(`Sản phẩm ID ${item.product_id} không tồn tại`);
                 }
-                
+
                 const stock = productCheck.rows[0].stock_quantity;
                 if (stock < item.quantity) {
                     // Nếu không đủ kho, báo lỗi cụ thể
                     await pool.query('ROLLBACK');
-                    return res.status(400).json({ 
-                        error: `Sản phẩm "${productCheck.rows[0].name}" chỉ còn ${stock} sản phẩm trong kho. Vui lòng cập nhật lại giỏ hàng.` 
+                    return res.status(400).json({
+                        error: `Sản phẩm "${productCheck.rows[0].name}" chỉ còn ${stock} sản phẩm trong kho. Vui lòng cập nhật lại giỏ hàng.`
                     });
                 }
 
@@ -1228,14 +1236,14 @@ app.get('/api/orders', async (req, res) => {
         const token = authHeader.split(' ')[1];
         const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret_token_default');
         const userId = decoded.user.id;
-        
+
         console.log(`🔍 [GET /api/orders] Fetching orders for user ID: ${userId}`);
 
         const result = await pool.query(
             'SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC',
             [userId]
         );
-        
+
         console.log(`✅ [GET /api/orders] Found ${result.rows.length} orders`);
         res.json(result.rows);
     } catch (err) {
@@ -1346,9 +1354,9 @@ app.put('/api/admin/orders/:id/status', async (req, res) => {
         // Lấy trạng thái hiện tại trước khi cập nhật
         const currentOrder = await pool.query('SELECT order_status FROM orders WHERE id = $1', [id]);
         if (currentOrder.rows.length === 0) return res.status(404).json({ error: 'Không tìm thấy đơn hàng' });
-        
+
         const oldStatus = currentOrder.rows[0].order_status;
-        
+
         await pool.query(
             'UPDATE orders SET order_status = $1, payment_status = $2 WHERE id = $3',
             [order_status, payment_status, id]
@@ -1436,13 +1444,13 @@ app.post('/api/addresses', authenticateToken, async (req, res) => {
             RETURNING *;
         `;
         const result = await pool.query(query, [
-            req.user.id, 
-            receiver_name, 
-            receiver_phone, 
-            full_address, 
+            req.user.id,
+            receiver_name,
+            receiver_phone,
+            full_address,
             latitude || 0, // Giá trị mặc định tránh lỗi DB
-            longitude || 0, 
-            label || 'Nhà riêng', 
+            longitude || 0,
+            label || 'Nhà riêng',
             is_default || false
         ]);
 
@@ -1474,8 +1482,8 @@ app.put('/api/addresses/:id', authenticateToken, async (req, res) => {
             RETURNING *;
         `;
         const result = await pool.query(query, [
-            receiver_name, receiver_phone, full_address, 
-            latitude || 0, longitude || 0, label || 'Nhà riêng', is_default || false, 
+            receiver_name, receiver_phone, full_address,
+            latitude || 0, longitude || 0, label || 'Nhà riêng', is_default || false,
             id, req.user.id
         ]);
 
@@ -1610,7 +1618,7 @@ app.post('/api/marketing/discount/categories', async (req, res) => {
 app.post('/api/admin/products/:id/restock', async (req, res) => {
     const { id } = req.params;
     const { quantity } = req.body;
-    
+
     if (!quantity || quantity <= 0) {
         return res.status(400).json({ error: 'Số lượng nhập không hợp lệ' });
     }
@@ -1634,12 +1642,12 @@ app.get('/api/admin/stats/revenue', async (req, res) => {
         const actualResult = await pool.query(
             "SELECT SUM(total_amount) as total FROM orders WHERE order_status = 'delivered'"
         );
-        
+
         // Doanh số ước tính (Tất cả trừ Hủy)
         const potentialResult = await pool.query(
             "SELECT SUM(total_amount) as total FROM orders WHERE order_status != 'cancelled'"
         );
-        
+
         // Thống kê doanh thu 7 ngày gần nhất
         const weeklyStats = await pool.query(`
             SELECT 
@@ -1654,7 +1662,7 @@ app.get('/api/admin/stats/revenue', async (req, res) => {
             ORDER BY 
                 date_series
         `);
-        
+
         // Thống kê theo danh mục
         const categoryStats = await pool.query(`
             SELECT 
@@ -1724,10 +1732,14 @@ app.get('/api/admin/stats/revenue', async (req, res) => {
 // NHẬP HÀNG (Stock Import) APIs
 // ==========================================
 
-// Auto-migration: Tạo bảng nhập hàng + cột cost_price
+// Auto-migration: Tạo bảng nhập hàng + cột cost_price + Shipper columns
 (async () => {
     try {
         await pool.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS cost_price NUMERIC(12,2) DEFAULT 0;');
+        await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_online BOOLEAN DEFAULT true;');
+        await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_fee NUMERIC(12,2) DEFAULT 30000;');
+        await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS pickup_confirmed_at TIMESTAMP;');
+
         await pool.query(`
             CREATE TABLE IF NOT EXISTS stock_imports (
                 id SERIAL PRIMARY KEY,
@@ -1751,9 +1763,20 @@ app.get('/api/admin/stats/revenue', async (req, res) => {
                 created_at TIMESTAMP DEFAULT NOW()
             );
         `);
-        console.log('✅ Stock import tables migration completed');
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                sender_id INTEGER REFERENCES users(id),
+                receiver_id INTEGER REFERENCES users(id), -- NULL nếu là Admin nhận chung
+                is_from_admin BOOLEAN DEFAULT false,
+                message TEXT NOT NULL,
+                is_read BOOLEAN DEFAULT false,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        `);
+        console.log('✅ Shipper, Stock & Chat tables migration completed');
     } catch (e) {
-        console.log('ℹ️ Stock import migration skipped:', e.message);
+        console.log('ℹ : Migration skipped (already exists or error):', e.message);
     }
 })();
 
@@ -1804,7 +1827,7 @@ app.post('/api/admin/stock-imports', async (req, res) => {
 
         // Tạo mã phiếu
         const importCode = 'NK' + Date.now().toString().slice(-10) + Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-        
+
         // Tính tổng tiền
         let totalCost = 0;
         for (const item of items) {
@@ -1858,7 +1881,143 @@ app.get('/api/admin/low-stock', async (req, res) => {
     }
 });
 
-// Đối soát COD shipper
+// ==========================================
+// SHIPPER PRO APIs
+// ==========================================
+
+// Middleware kiểm tra quyền Shipper (Đơn giản hóa)
+const isShipper = (req, res, next) => {
+    // Trong thực tế sẽ verify token và check role, ở đây ta giả định shipperId truyền qua params/body hoặc header
+    next();
+};
+
+// Bật/Tắt trạng thái Online
+app.put('/api/shipper/toggle-online', async (req, res) => {
+    const { shipperId, isOnline } = req.body;
+    try {
+        await pool.query('UPDATE users SET is_online = $1 WHERE id = $2 AND role = \'shipper\'', [isOnline, shipperId]);
+        res.json({ message: 'Cập nhật trạng thái thành công', isOnline });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Thống kê Thu nhập & COD cho Shipper
+app.get('/api/shipper/stats/:shipperId', async (req, res) => {
+    const { shipperId } = req.params;
+    try {
+        const result = await pool.query(`
+            SELECT 
+                COUNT(CASE WHEN order_status = 'delivered' THEN 1 END) as completed_orders,
+                COALESCE(SUM(CASE WHEN order_status = 'delivered' THEN shipping_fee END), 0) as total_earnings,
+                COALESCE(SUM(CASE WHEN order_status = 'delivered' AND payment_method = 'COD' THEN CAST(total_amount AS NUMERIC) END), 0) as cod_collected,
+                COALESCE(SUM(CASE WHEN order_status = 'shipping' AND payment_method = 'COD' THEN CAST(total_amount AS NUMERIC) END), 0) as cod_pending,
+                (SELECT is_online FROM users WHERE id = $1) as is_online
+            FROM orders
+            WHERE shipper_id = $1
+        `, [shipperId]);
+
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Xác nhận lấy hàng bằng QR Code (Warehouse Pickup)
+app.put('/api/shipper/orders/:orderId/pickup', async (req, res) => {
+    const { orderId } = req.params;
+    const { shipperId } = req.body;
+    try {
+        const result = await pool.query(`
+            UPDATE orders 
+            SET order_status = 'shipping', pickup_confirmed_at = NOW() 
+            WHERE id = $1 AND (shipper_id = $2 OR shipper_id IS NULL)
+            RETURNING *
+        `, [orderId, shipperId]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Không tìm thấy đơn hàng hoặc bạn không có quyền gán đơn này' });
+        }
+        res.json({ message: 'Xác nhận lấy hàng thành công', order: result.rows[0] });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ==========================================
+// CHAT & CUSTOMER SUPPORT APIs
+// ==========================================
+
+// Gửi tin nhắn (Cả User và Admin dùng chung)
+app.post('/api/messages', async (req, res) => {
+    const { sender_id, receiver_id, message, is_from_admin } = req.body;
+    console.log(`[Chat] Gửi tin nhắn: from=${sender_id}, to=${receiver_id}, admin=${is_from_admin}`);
+    try {
+        const result = await pool.query(
+            'INSERT INTO messages (sender_id, receiver_id, message, is_from_admin) VALUES ($1::integer, $2::integer, $3, $4) RETURNING *',
+            [sender_id, receiver_id || null, message, is_from_admin || false]
+        );
+        res.status(201).json(result.rows[0]);
+    } catch (err) {
+        console.error('[Chat Error] Lỗi gửi tin nhắn:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Lấy lịch sử chat của 1 User (với Admin)
+app.get('/api/messages/:userId', async (req, res) => {
+    const { userId } = req.params;
+    try {
+        const result = await pool.query(`
+            SELECT * FROM messages 
+            WHERE (sender_id = $1 AND is_from_admin = false) 
+               OR (receiver_id = $1 AND is_from_admin = true)
+            ORDER BY created_at ASC
+        `, [userId]);
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Admin: Lấy danh sách các cuộc hội thoại (Danh sách khách hàng đã nhắn tin)
+app.get('/api/admin/conversations', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                u.id, u.full_name, u.email, u.role,
+                (SELECT message FROM messages 
+                 WHERE sender_id = u.id OR receiver_id = u.id 
+                 ORDER BY created_at DESC LIMIT 1) as last_message,
+                (SELECT created_at FROM messages 
+                 WHERE sender_id = u.id OR receiver_id = u.id 
+                 ORDER BY created_at DESC LIMIT 1) as last_message_at,
+                (SELECT COUNT(*) FROM messages 
+                 WHERE sender_id = u.id AND is_read = false AND is_from_admin = false) as unread_count
+            FROM users u
+            WHERE u.role != 'admin'
+              AND EXISTS (SELECT 1 FROM messages WHERE sender_id = u.id OR receiver_id = u.id)
+            ORDER BY last_message_at DESC NULLS LAST
+        `);
+        res.json(result.rows);
+    } catch (err) {
+        console.error('[Chat Error] Lỗi lấy danh sách hội thoại:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Đánh dấu đã đọc
+app.put('/api/messages/read/:userId', async (req, res) => {
+    const { userId } = req.params;
+    try {
+        await pool.query('UPDATE messages SET is_read = true WHERE sender_id = $1 AND is_from_admin = false', [userId]);
+        res.json({ message: 'Đã đánh dấu đã đọc' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Đối soát COD shipper (Dành cho Admin)
 app.get('/api/admin/cod-report', async (req, res) => {
     try {
         const result = await pool.query(`
