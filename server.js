@@ -1029,14 +1029,14 @@ function generateOrderCode() {
 }
 
 // Helper: Tạo thông báo
-async function createNotification(userId, title, body, type = 'system', relatedId = null) {
+async function createNotification(userId, title, body, type = 'system', relatedId = null, imageUrl = null) {
     try {
         const query = `
-            INSERT INTO notifications (user_id, title, body, type, related_id)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO notifications (user_id, title, body, type, related_id, image_url)
+            VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING *;
         `;
-        await pool.query(query, [userId, title, body, type, relatedId]);
+        await pool.query(query, [userId, title, body, type, relatedId, imageUrl]);
     } catch (err) {
         console.error('Lỗi tạo thông báo:', err.message);
     }
@@ -1126,12 +1126,19 @@ app.post('/api/orders', async (req, res) => {
 
         // Tạo thông báo cho người dùng
         if (userId) {
+            let firstItemImage = null;
+            if (items && items.length > 0) {
+                const imgRes = await pool.query('SELECT image_url FROM products WHERE id = $1', [items[0].product_id]);
+                if (imgRes.rows.length > 0) firstItemImage = imgRes.rows[0].image_url;
+            }
+
             await createNotification(
                 userId,
                 'Đặt hàng thành công! 🎉',
                 `Đơn hàng #${orderCode} của bạn đã được tiếp nhận. Tổng tiền: ${total_amount.toLocaleString()}đ`,
                 'order',
-                order.id
+                order.id,
+                firstItemImage
             );
         }
 
@@ -1346,12 +1353,17 @@ app.post('/api/orders/:id/cancel', async (req, res) => {
         console.log(`🚫 [POST /api/orders/${id}/cancel] User ${userId} cancelled order. Reason: ${cancel_reason}`);
         
         // Thông báo xác nhận cho người dùng
+        let cancelOrderImage = null;
+        const cancelImgRes = await pool.query('SELECT p.image_url FROM order_items oi JOIN products p ON oi.product_id = p.id WHERE oi.order_id = $1 LIMIT 1', [id]);
+        if (cancelImgRes.rows.length > 0) cancelOrderImage = cancelImgRes.rows[0].image_url;
+
         await createNotification(
             userId,
             'Hủy đơn hàng thành công 🚫',
             `Đơn hàng #${order.order_code} của bạn đã được hủy theo yêu cầu.`,
             'order',
-            id
+            id,
+            cancelOrderImage
         );
 
         res.json({ message: 'Đã hủy đơn hàng thành công' });
@@ -1456,12 +1468,17 @@ app.put('/api/admin/orders/:id/status', async (req, res) => {
                 default: statusText = 'đã thay đổi trạng thái';
             }
 
+            let orderUpdateImage = null;
+            const updateImgRes = await pool.query('SELECT p.image_url FROM order_items oi JOIN products p ON oi.product_id = p.id WHERE oi.order_id = $1 LIMIT 1', [id]);
+            if (updateImgRes.rows.length > 0) orderUpdateImage = updateImgRes.rows[0].image_url;
+
             await createNotification(
                 orderInfo.rows[0].user_id,
                 'Cập nhật đơn hàng 📦',
                 `Đơn hàng #${orderInfo.rows[0].order_code} của bạn ${statusText}.`,
                 'order',
-                id
+                id,
+                orderUpdateImage
             );
         }
 
@@ -1675,11 +1692,11 @@ app.put('/api/notifications/read-all', authenticateToken, async (req, res) => {
 app.post('/api/notifications/broadcast', authenticateToken, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Không có quyền' });
 
-    const { title, body } = req.body;
+    const { title, body, image_url, product_id } = req.body;
     try {
         const users = await pool.query('SELECT id FROM users WHERE role = $1', ['user']);
         for (const user of users.rows) {
-            await createNotification(user.id, title, body, 'sale');
+            await createNotification(user.id, title, body, 'sale', product_id, image_url);
         }
         res.json({ message: `Đã gửi thông báo tới ${users.rowCount} khách hàng` });
     } catch (err) {
@@ -1731,12 +1748,15 @@ app.post('/api/marketing/discount/products', async (req, res) => {
                 const usersResult = await pool.query("SELECT id FROM users WHERE role NOT IN ('admin', 'shipper')");
                 console.log(`[Marketing] 📢 Đang gửi thông báo Sale cho ${usersResult.rowCount} khách hàng...`);
                 
+                const firstProduct = result.rows[0];
                 for (const user of usersResult.rows) {
                     await createNotification(
                         user.id,
                         'Siêu Sale Đổ Bộ! 🔥',
                         `Nhiều sản phẩm bạn yêu thích vừa được giảm giá ${discountPercent}%. Mua ngay kẻo lỡ!`,
-                        'sale'
+                        'sale',
+                        firstProduct?.id,
+                        firstProduct?.image_url
                     );
                 }
                 console.log(`[Marketing] ✅ Đã gửi xong thông báo Sale.`);
@@ -1785,12 +1805,15 @@ app.post('/api/marketing/discount/categories', async (req, res) => {
                 const usersResult = await pool.query("SELECT id FROM users WHERE role NOT IN ('admin', 'shipper')");
                 console.log(`[Marketing] 📢 Đang gửi thông báo Sale danh mục cho ${usersResult.rowCount} khách hàng...`);
                 
+                const firstProdInCat = result.rows[0];
                 for (const user of usersResult.rows) {
                     await createNotification(
                         user.id,
                         'Khuyến Mãi Theo Danh Mục! 🏷️',
                         `Danh mục sản phẩm bạn quan tâm vừa giảm giá ${discountPercent}%. Khám phá ngay!`,
-                        'sale'
+                        'sale',
+                        firstProdInCat?.id,
+                        firstProdInCat?.image_url
                     );
                 }
                 console.log(`[Marketing] ✅ Đã gửi xong thông báo Sale.`);
