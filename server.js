@@ -1127,9 +1127,20 @@ app.post('/api/orders', async (req, res) => {
         // Tạo thông báo cho người dùng
         if (userId) {
             let firstItemImage = null;
-            if (items && items.length > 0) {
-                const imgRes = await pool.query('SELECT image_url FROM products WHERE id = $1', [items[0].product_id]);
-                if (imgRes.rows.length > 0) firstItemImage = imgRes.rows[0].image_url;
+            try {
+                const imgRes = await pool.query(`
+                    SELECT p.image_url 
+                    FROM order_items oi 
+                    JOIN products p ON oi.product_id = p.id 
+                    WHERE oi.order_id = $1 
+                    LIMIT 1
+                `, [order.id]);
+                if (imgRes.rows.length > 0) {
+                    firstItemImage = imgRes.rows[0].image_url;
+                }
+                console.log(`[Order Notification] Order ID: ${order.id}, Image: ${firstItemImage}`);
+            } catch (imgErr) {
+                console.error('[Order Notification Error] Failed to get product image:', imgErr.message);
             }
 
             await createNotification(
@@ -1469,8 +1480,21 @@ app.put('/api/admin/orders/:id/status', async (req, res) => {
             }
 
             let orderUpdateImage = null;
-            const updateImgRes = await pool.query('SELECT p.image_url FROM order_items oi JOIN products p ON oi.product_id = p.id WHERE oi.order_id = $1 LIMIT 1', [id]);
-            if (updateImgRes.rows.length > 0) orderUpdateImage = updateImgRes.rows[0].image_url;
+            try {
+                const updateImgRes = await pool.query(`
+                    SELECT p.image_url 
+                    FROM order_items oi 
+                    JOIN products p ON oi.product_id = p.id 
+                    WHERE oi.order_id = $1 
+                    LIMIT 1
+                `, [id]);
+                if (updateImgRes.rows.length > 0) {
+                    orderUpdateImage = updateImgRes.rows[0].image_url;
+                }
+                console.log(`[Status Update Notification] Order ID: ${id}, Status: ${order_status}, Image: ${orderUpdateImage}`);
+            } catch (imgErr) {
+                console.error('[Status Update Notification Error] Failed to get product image:', imgErr.message);
+            }
 
             await createNotification(
                 orderInfo.rows[0].user_id,
