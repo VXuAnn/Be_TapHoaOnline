@@ -1004,6 +1004,20 @@ function generateOrderCode() {
     return `TH${timestamp}${random}`;
 }
 
+// Helper: Tạo thông báo
+async function createNotification(userId, title, body, type = 'system', relatedId = null) {
+    try {
+        const query = `
+            INSERT INTO notifications (user_id, title, body, type, related_id)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING *;
+        `;
+        await pool.query(query, [userId, title, body, type, relatedId]);
+    } catch (err) {
+        console.error('Lỗi tạo thông báo:', err.message);
+    }
+}
+
 // Helper: Sắp xếp object theo key (yêu cầu của VNPay)
 function sortObject(obj) {
     let sorted = {};
@@ -1085,6 +1099,18 @@ app.post('/api/orders', async (req, res) => {
         }
 
         await pool.query('COMMIT');
+
+        // Tạo thông báo cho người dùng
+        if (userId) {
+            await createNotification(
+                userId,
+                'Đặt hàng thành công! 🎉',
+                `Đơn hàng #${orderCode} của bạn đã được tiếp nhận. Tổng tiền: ${total_amount.toLocaleString()}đ`,
+                'order',
+                order.id
+            );
+        }
+
         res.status(201).json(order);
     } catch (err) {
         await pool.query('ROLLBACK');
@@ -1383,6 +1409,27 @@ app.put('/api/admin/orders/:id/status', async (req, res) => {
             }
         }
 
+        // Tạo thông báo cập nhật trạng thái
+        const orderInfo = await pool.query('SELECT user_id, order_code FROM orders WHERE id = $1', [id]);
+        if (orderInfo.rows.length > 0 && orderInfo.rows[0].user_id) {
+            let statusText = '';
+            switch(order_status) {
+                case 'confirmed': statusText = 'đã được xác nhận'; break;
+                case 'shipping': statusText = 'đang được giao'; break;
+                case 'completed': statusText = 'đã hoàn thành'; break;
+                case 'cancelled': statusText = 'đã bị hủy'; break;
+                default: statusText = 'đã thay đổi trạng thái';
+            }
+            
+            await createNotification(
+                orderInfo.rows[0].user_id,
+                'Cập nhật đơn hàng 📦',
+                `Đơn hàng #${orderInfo.rows[0].order_code} của bạn ${statusText}.`,
+                'order',
+                id
+            );
+        }
+
         res.json({ message: 'Cập nhật thành công' });
     } catch (err) {
         console.error(`Lỗi tại ${req.path}:`, err.message);
@@ -1532,6 +1579,67 @@ app.patch('/api/addresses/:id/set-default', authenticateToken, async (req, res) 
     } catch (err) {
         await pool.query('ROLLBACK');
         console.error('Lỗi đặt mặc định:', err.message);
+        res.status(500).json({ error: 'Lỗi server' });
+    }
+});
+
+// ==========================================
+// NOTIFICATION APIs
+// ==========================================
+
+// 1. Lấy danh sách thông báo của user
+app.get('/api/notifications', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50',
+            [req.user.id]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Lỗi lấy thông báo:', err.message);
+        res.status(500).json({ error: 'Lỗi server' });
+    }
+});
+
+// 2. Đánh dấu thông báo đã đọc
+app.put('/api/notifications/:id/read', authenticateToken, async (req, res) => {
+    try {
+        const { id } = req.params;
+        await pool.query(
+            'UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2',
+            [id, req.user.id]
+        );
+        res.json({ message: 'Success' });
+    } catch (err) {
+        res.status(500).json({ error: 'Lỗi server' });
+    }
+});
+
+// 3. Đánh dấu tất cả đã đọc
+app.put('/api/notifications/read-all', authenticateToken, async (req, res) => {
+    try {
+        await pool.query(
+            'UPDATE notifications SET is_read = TRUE WHERE user_id = $1',
+            [req.user.id]
+        );
+        res.json({ message: 'Success' });
+    } catch (err) {
+        res.status(500).json({ error: 'Lỗi server' });
+    }
+});
+
+// 4. Gửi thông báo Sale hàng loạt (Chỉ Admin)
+app.post('/api/notifications/broadcast', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Không có quyền' });
+    
+    const { title, body } = req.body;
+    try {
+        const users = await pool.query('SELECT id FROM users WHERE role = $1', ['user']);
+        for (const user of users.rows) {
+            await createNotification(user.id, title, body, 'sale');
+        }
+        res.json({ message: `Đã gửi thông báo tới ${users.rowCount} khách hàng` });
+    } catch (err) {
         res.status(500).json({ error: 'Lỗi server' });
     }
 });
