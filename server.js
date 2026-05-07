@@ -323,6 +323,89 @@ app.get('/api/shipper/orders', async (req, res) => {
     }
 });
 
+// ==========================================
+// HOME CONFIGURATION APIs (QUẢN LÝ TRANG CHỦ)
+// ==========================================
+
+// Migration: Tạo bảng home_sections
+(async () => {
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS home_sections (
+                id SERIAL PRIMARY KEY,
+                type VARCHAR(50) NOT NULL,
+                title VARCHAR(255),
+                content_json JSONB,
+                sort_order INT DEFAULT 0,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+        console.log('✅ Home sections table created');
+
+        // Insert dữ liệu mặc định nếu bảng trống
+        const countRes = await pool.query('SELECT COUNT(*) FROM home_sections');
+        if (parseInt(countRes.rows[0].count) === 0) {
+            console.log('📦 Populating default home sections...');
+            await pool.query(`
+                INSERT INTO home_sections (type, title, content_json, sort_order) VALUES
+                ('banner', 'Banners', '{"images": ["https://picsum.photos/800/400?seed=1", "https://picsum.photos/800/400?seed=2"]}', 1),
+                ('categories', 'Danh mục chính', '{"limit": 10}', 2),
+                ('flash_sale', 'Flash Sale', '{"limit": 5}', 3),
+                ('featured_categories', 'Danh mục nổi bật', '{"limit": 10}', 4),
+                ('promo_banner', 'Khuyến mãi', '{"banners": ["https://picsum.photos/600/200?seed=3"]}', 5),
+                ('product_tab', 'Góc Quê Nhà', '{"main_category_id": 1, "color": "#43A047", "show_banner": true}', 6),
+                ('product_tab', 'Góc Thực Phẩm', '{"main_category_id": 9, "color": "#E53935", "show_banner": false}', 7),
+                ('product_tab', 'Góc Mẹ Và Bé', '{"main_category_id": 3, "color": "#1E88E5", "show_banner": false}', 8),
+                ('product_tab', 'Góc Nấu Ăn', '{"main_category_id": 8, "color": "#FB8C00", "show_banner": false}', 9);
+            `);
+        }
+    } catch (e) {
+        console.log('ℹ️ Home sections migration skipped/error:', e.message);
+    }
+})();
+
+// Lấy cấu hình trang chủ
+app.get('/api/home-config', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM home_sections WHERE is_active = TRUE ORDER BY sort_order ASC');
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: 'Lỗi lấy cấu hình trang chủ' });
+    }
+});
+
+// Cập nhật cấu hình trang chủ (Dành cho Admin)
+app.put('/api/home-config/:id', async (req, res) => {
+    const { id } = req.params;
+    const { title, content_json, sort_order, is_active } = req.body;
+    try {
+        await pool.query(`
+            UPDATE home_sections 
+            SET title = $1, content_json = $2, sort_order = $3, is_active = $4, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $5
+        `, [title, content_json, sort_order, is_active, id]);
+        res.json({ message: 'Cập nhật thành công' });
+    } catch (err) {
+        res.status(500).json({ error: 'Lỗi cập nhật cấu hình' });
+    }
+});
+
+// Thêm section mới
+app.post('/api/home-config', async (req, res) => {
+    const { type, title, content_json, sort_order } = req.body;
+    try {
+        const result = await pool.query(`
+            INSERT INTO home_sections (type, title, content_json, sort_order)
+            VALUES ($1, $2, $3, $4) RETURNING *
+        `, [type, title, content_json, sort_order]);
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: 'Lỗi thêm section' });
+    }
+});
+
 // Cập nhật trạng thái đơn hàng (Shipper)
 app.put('/api/shipper/orders/:id/status', async (req, res) => {
     const { id } = req.params;
