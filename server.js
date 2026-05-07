@@ -282,18 +282,108 @@ app.post('/api/google-login', async (req, res) => {
 // SHIPPER APIs
 // ==========================================
 
-// Auto-migration: Thêm các cột shipper vào bảng orders nếu chưa có
+// Auto-migration: Thêm các cột shipper và promo vào bảng orders nếu chưa có
 (async () => {
     try {
         await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipper_id INTEGER REFERENCES users(id);');
         await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMP;');
         await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_proof TEXT;');
         await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS failed_reason TEXT;');
-        console.log('✅ Shipper columns migration completed');
+        await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS promo_code VARCHAR(50);');
+        await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_fee NUMERIC DEFAULT 0;');
+        
+        // Tạo bảng promo_codes
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                id SERIAL PRIMARY KEY,
+                code VARCHAR(50) UNIQUE NOT NULL,
+                type VARCHAR(20) NOT NULL, -- 'amount', 'percent', 'freeShip'
+                value NUMERIC NOT NULL,
+                min_order_amount NUMERIC DEFAULT 0,
+                description TEXT,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            );
+        `);
+        console.log('✅ Migration completed (Shipper, Promo, Shipping)');
     } catch (e) {
-        console.log('ℹ️ Shipper columns migration skipped (already exists or error):', e.message);
+        console.log('ℹ️ Migration skipped or error:', e.message);
     }
 })();
+
+// --- PROMO CODES APIs ---
+
+// Lấy danh sách mã giảm giá
+app.get('/api/promo-codes', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM promo_codes ORDER BY created_at DESC');
+        res.json(result.rows);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).json({ error: 'Lỗi server khi lấy danh sách mã giảm giá' });
+    }
+});
+
+// Thêm mã giảm giá mới
+app.post('/api/promo-codes', async (req, res) => {
+    const { code, type, value, min_order_amount, description } = req.body;
+    try {
+        const result = await pool.query(
+            `INSERT INTO promo_codes (code, type, value, min_order_amount, description) 
+             VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+            [code.toUpperCase(), type, value, min_order_amount || 0, description]
+        );
+        res.status(201).json(result.rows[0]);
+    } catch (err) {
+        if (err.code === '23505') {
+            return res.status(400).json({ error: 'Mã giảm giá này đã tồn tại' });
+        }
+        console.error(err.message);
+        res.status(500).json({ error: 'Lỗi server khi tạo mã giảm giá' });
+    }
+});
+
+// Xóa mã giảm giá
+app.delete('/api/promo-codes/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const result = await pool.query('DELETE FROM promo_codes WHERE id = $1 RETURNING *', [id]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Không tìm thấy mã giảm giá' });
+        res.json({ message: 'Xóa mã giảm giá thành công' });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).json({ error: 'Lỗi server khi xóa mã giảm giá' });
+    }
+});
+
+// Kiểm tra mã giảm giá (Dành cho App gọi khi checkout)
+app.get('/api/promo-codes/validate', async (req, res) => {
+    const { code, amount } = req.query;
+    if (!code) return res.status(400).json({ error: 'Thiếu mã giảm giá' });
+    
+    try {
+        const result = await pool.query(
+            'SELECT * FROM promo_codes WHERE code = $1 AND is_active = TRUE',
+            [code.toUpperCase()]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Mã giảm giá không hợp lệ hoặc đã hết hạn' });
+        }
+        const promo = result.rows[0];
+        if (amount && parseFloat(amount) < parseFloat(promo.min_order_amount)) {
+            return res.status(400).json({ 
+                error: `Mã này chỉ áp dụng cho đơn hàng từ ${new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(promo.min_order_amount)} trở lên` 
+            });
+        }
+        res.json(promo);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).json({ error: 'Lỗi server' });
+    }
+});
+
+
 
 // Lấy danh sách đơn hàng cho Shipper (chỉ lấy đơn được gán cho shipper này)
 app.get('/api/shipper/orders', async (req, res) => {
@@ -1068,7 +1158,7 @@ function sortObject(obj) {
 
 // ---- TẠO ĐƠN HÀNG ----
 app.post('/api/orders', async (req, res) => {
-    const { customer_name, customer_phone, customer_address, total_amount, payment_method, items } = req.body;
+    const { customer_name, customer_phone, customer_address, total_amount, payment_method, items, promo_code, shipping_fee } = req.body;
 
     try {
         await pool.query('BEGIN');
@@ -1090,13 +1180,13 @@ app.post('/api/orders', async (req, res) => {
 
         const paymentStatus = payment_method === 'COD' ? 'cod_pending' : 'pending';
         const orderQuery = `
-            INSERT INTO orders (user_id, order_code, customer_name, customer_phone, customer_address, total_amount, payment_method, payment_status, order_status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            INSERT INTO orders (user_id, order_code, customer_name, customer_phone, customer_address, total_amount, payment_method, payment_status, order_status, promo_code, shipping_fee)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING *;
         `;
         const orderResult = await pool.query(orderQuery, [
             userId, orderCode, customer_name, customer_phone, customer_address,
-            total_amount, payment_method, paymentStatus, 'pending'
+            total_amount, payment_method, paymentStatus, 'pending', promo_code || null, shipping_fee || 0
         ]);
         const order = orderResult.rows[0];
 
