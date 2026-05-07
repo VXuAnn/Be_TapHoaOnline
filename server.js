@@ -2327,16 +2327,16 @@ app.put('/api/shipper/orders/:orderId/pickup', async (req, res) => {
 async function handleChatbotResponse(userId, userMessage) {
     try {
         const apiKey = process.env.GEMINI_API_KEY;
+        console.log(`[AI Bot] Bắt đầu xử lý cho User ${userId}. API Key: ${apiKey ? 'OK' : 'MISSING'}`);
+        
         if (!apiKey || apiKey === 'YOUR_GEMINI_API_KEY_HERE') {
             console.log('[AI Bot] Bỏ qua chatbot vì thiếu API Key trong .env');
             return;
         }
 
-        console.log(`[AI Bot] Đang xử lý tin nhắn cho User ${userId}: "${userMessage}"`);
-
-        // Khởi tạo model bên trong để đảm bảo lấy được API Key mới nhất
+        // Khởi tạo model
         const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
         // 1. Thu thập context của người dùng (Đơn hàng gần đây)
         const ordersRes = await pool.query(
@@ -2350,7 +2350,7 @@ async function handleChatbotResponse(userId, userMessage) {
             ).join('\n');
         }
 
-        // 2. Thu thập context về cửa hàng (Cực kỳ đầy đủ)
+        // 2. Thu thập context về cửa hàng
         const categoriesRes = await pool.query(`
             SELECT mc.name as main_cat, string_agg(sc.name, ', ') as sub_cats 
             FROM main_categories mc 
@@ -2364,69 +2364,69 @@ async function handleChatbotResponse(userId, userMessage) {
             FROM products p
             JOIN sub_categories sc ON p.sub_category_id = sc.id
             JOIN main_categories mc ON sc.main_category_id = mc.id
-            ORDER BY p.discount_percent DESC, p.sold_quantity DESC LIMIT 25
+            ORDER BY p.discount_percent DESC, p.sold_quantity DESC LIMIT 20
         `);
-        const productContext = "\nDanh sách sản phẩm tiêu biểu & Giảm giá:\n" + productsRes.rows.map(p => 
-            `[${p.cat_name}] ${p.name}: ${p.price}đ ${p.discount_percent > 0 ? `(Giảm ${p.discount_percent}%)` : ''}`
+        const productContext = "\nDanh sách sản phẩm tiêu biểu:\n" + productsRes.rows.map(p => 
+            `[${p.cat_name}] ${p.name}: ${p.price}đ`
         ).join('\n');
 
-        // 3. Xây dựng System Prompt với quy tắc Escalation (Chuyển Admin)
+        // 3. Xây dựng System Prompt
         const systemPrompt = `
-            Bạn là "Trợ lý ảo toàn năng" của siêu thị TapHoaOnline. 
-            Bạn có quyền truy cập vào danh mục hàng hóa và đơn hàng của hệ thống.
+            Bạn là "Trợ lý ảo" của siêu thị TapHoaOnline. 
+            Nhiệm vụ: Tư vấn sản phẩm và giải đáp thắc mắc.
             
-            QUY TẮC PHẢN HỒI:
-            1. TƯ VẤN: Dựa trên nhu cầu khách (nấu ăn, mua sắm, sửa chữa) để gợi ý sản phẩm phù hợp.
-            2. TRA CỨU: Thông báo chính xác trạng thái đơn hàng nếu mã khớp.
-            3. QUY TẮC THOÁT (IMPORTANT): 
-               - Nếu khách hàng yêu cầu gặp "người thật", "Admin", hoặc "nhân viên".
-               - Nếu khách hỏi vấn đề quá phức tạp (khiếu nại, hoàn tiền, lỗi app nặng).
-               - Nếu bạn KHÔNG tìm thấy sản phẩm hoặc thông tin yêu cầu sau 2 lần thử.
-               => Hãy trả lời: "Dạ, vấn đề này hơi phức tạp, tôi đã báo cáo với Admin. Admin sẽ phản hồi bạn trong mục chat này sớm nhất nhé! Cảm ơn bạn."
+            QUY TẮC:
+            1. TƯ VẤN: Gợi ý sản phẩm dựa trên nhu cầu khách.
+            2. TRA CỨU: Thông báo trạng thái đơn hàng nếu mã khớp.
+            3. CHUYỂN ADMIN: Nếu khách muốn gặp người thật hoặc hỏi vấn đề khiếu nại.
+               => Trả lời: "Dạ, vấn đề này tôi đã báo cáo với Admin. Admin sẽ phản hồi bạn sớm nhất nhé! Cảm ơn bạn."
 
-            Cấu trúc danh mục shop:
+            Danh mục:
             ${categoriesContext}
-            
             ${orderContext}
             ${productContext}
-
-            Hãy đóng vai người hỗ trợ chuyên nghiệp, xử lý yêu cầu nhanh gọn.
         `;
 
         // 4. Gọi Gemini AI
         console.log('[AI Bot] Đang gọi Gemini API...');
         const result = await model.generateContent([systemPrompt, userMessage]);
-        const botResponse = result.response.text();
-        console.log('[AI Bot] Đã nhận phản hồi từ Gemini');
+        
+        if (!result || !result.response) {
+            throw new Error('Gemini API returned an empty response');
+        }
 
-        // 5. Lưu câu trả lời của Bot vào database (Dưới danh nghĩa Admin)
-        // Chờ 1.5 giây để tạo cảm giác tự nhiên như đang gõ
+        const botResponse = result.response.text();
+        console.log('[AI Bot] Gemini phản hồi thành công');
+
+        // Tìm một Admin để làm sender
+        const adminRes = await pool.query("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
+        const adminId = adminRes.rows.length > 0 ? adminRes.rows[0].id : 1;
+
+        // 5. Lưu câu trả lời (Chờ 1s cho tự nhiên)
         setTimeout(async () => {
             try {
-                await pool.query(
-                    'INSERT INTO messages (sender_id, receiver_id, message, is_from_admin) VALUES ($1, $2, $3, $4)',
-                    [1, userId, botResponse, true] // Giả định ID 1 là Admin hệ thống
+                const saveResult = await pool.query(
+                    'INSERT INTO messages (sender_id, receiver_id, message, is_from_admin) VALUES ($1, $2, $3, $4) RETURNING id',
+                    [adminId, userId, botResponse, true]
                 );
-                console.log(`[AI Bot] Đã trả lời cho User ${userId}`);
+                console.log(`[AI Bot] Đã gửi phản hồi (ID: ${saveResult.rows[0].id}) tới User ${userId}`);
 
-                // Nếu Bot đề cập đến việc báo Admin, tạo một thông báo thực tế cho Admin
-                if (botResponse.includes("báo cáo với Admin") || botResponse.includes("báo với Admin")) {
+                if (botResponse.includes("báo cáo với Admin") || botResponse.includes("phản hồi bạn sớm nhất")) {
                     await createNotification(
-                        1, // Admin ID
-                        'Yêu cầu hỗ trợ từ khách hàng 🆘',
-                        `Khách hàng (ID: ${userId}) đang cần gặp Admin trực tiếp. Nội dung: "${userMessage}"`,
+                        adminId,
+                        'Yêu cầu hỗ trợ 🆘',
+                        `Khách hàng (ID: ${userId}) cần gặp Admin. Tin nhắn: "${userMessage}"`,
                         'system',
                         userId
                     );
-                    console.log(`[AI Bot] Đã tạo thông báo yêu cầu hỗ trợ cho Admin`);
                 }
             } catch (saveErr) {
-                console.error('[AI Bot Error] Lỗi lưu tin nhắn Bot:', saveErr.message);
+                console.error('[AI Bot Error] Lỗi lưu tin nhắn:', saveErr.message);
             }
-        }, 1500);
+        }, 1000);
 
     } catch (error) {
-        console.error('[AI Bot Error] Lỗi xử lý Chatbot:', error.message);
+        console.error('[AI Bot Error] Lỗi Chatbot:', error.message);
     }
 }
 
