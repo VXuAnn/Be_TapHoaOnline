@@ -2227,10 +2227,17 @@ app.put('/api/shipper/orders/:orderId/pickup', async (req, res) => {
  */
 async function handleChatbotResponse(userId, userMessage) {
     try {
-        if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'YOUR_GEMINI_API_KEY_HERE') {
-            console.log('[AI Bot] Bỏ qua chatbot vì thiếu API Key');
+        const apiKey = process.env.GEMINI_API_KEY;
+        if (!apiKey || apiKey === 'YOUR_GEMINI_API_KEY_HERE') {
+            console.log('[AI Bot] Bỏ qua chatbot vì thiếu API Key trong .env');
             return;
         }
+
+        console.log(`[AI Bot] Đang xử lý tin nhắn cho User ${userId}: "${userMessage}"`);
+
+        // Khởi tạo model bên trong để đảm bảo lấy được API Key mới nhất
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
         // 1. Thu thập context của người dùng (Đơn hàng gần đây)
         const ordersRes = await pool.query(
@@ -2288,8 +2295,10 @@ async function handleChatbotResponse(userId, userMessage) {
         `;
 
         // 4. Gọi Gemini AI
+        console.log('[AI Bot] Đang gọi Gemini API...');
         const result = await model.generateContent([systemPrompt, userMessage]);
         const botResponse = result.response.text();
+        console.log('[AI Bot] Đã nhận phản hồi từ Gemini');
 
         // 5. Lưu câu trả lời của Bot vào database (Dưới danh nghĩa Admin)
         // Chờ 1.5 giây để tạo cảm giác tự nhiên như đang gõ
