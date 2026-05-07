@@ -66,6 +66,9 @@ app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
+// Route kiểm tra server có đang chạy code mới không
+app.get('/api/ping', (req, res) => res.json({ status: 'ok', version: '1.0.1', time: new Date().toISOString() }));
+
 // Middleware ghi log mọi request
 app.use((req, res, next) => {
     console.log(`[Request] ${req.method} ${req.url} - ${new Date().toLocaleTimeString()}`);
