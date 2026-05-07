@@ -15,7 +15,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 // AI Configuration
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
 process.on('uncaughtException', (err) => {
     console.error('UNCAUGHT EXCEPTION:', err);
@@ -2336,7 +2336,7 @@ async function handleChatbotResponse(userId, userMessage) {
 
         // Khởi tạo model
         const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
         // 1. Thu thập context của người dùng (Đơn hàng gần đây)
         const ordersRes = await pool.query(
@@ -2436,16 +2436,12 @@ app.get('/api/ai/test', async (req, res) => {
         const apiKey = process.env.GEMINI_API_KEY;
         if (!apiKey) return res.status(400).json({ error: 'Thiếu API Key' });
 
-        // Dùng fetch thay vì SDK để lấy thẳng danh sách model mà API Key này được phép dùng
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
-        const data = await response.json();
-        
-        res.json({ 
-            message: 'Đây là danh sách các model Gemini khả dụng cho API Key của bạn:', 
-            models: data.models ? data.models.map(m => m.name).filter(name => name.includes('gemini')) : data
-        });
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+        const result = await model.generateContent("Xin chào, bạn tên là gì?");
+        res.json({ message: 'Kết nối Gemini OK!', response: result.response.text() });
     } catch (err) {
-        res.status(500).json({ error: 'Lỗi lấy danh sách model: ' + err.message });
+        res.status(500).json({ error: 'Lỗi kết nối Gemini: ' + err.message });
     }
 });
 
