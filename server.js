@@ -2406,7 +2406,7 @@ async function handleChatbotResponse(userId, userMessage) {
         setTimeout(async () => {
             try {
                 const saveResult = await pool.query(
-                    'INSERT INTO messages (sender_id, receiver_id, message, is_from_admin) VALUES ($1, $2, $3, $4) RETURNING id',
+                    'INSERT INTO messages (sender_id, receiver_id, message, is_from_admin) VALUES ($1::integer, $2::integer, $3, $4) RETURNING id',
                     [adminId, userId, botResponse, true]
                 );
                 console.log(`[AI Bot] Đã gửi phản hồi (ID: ${saveResult.rows[0].id}) tới User ${userId}`);
@@ -2429,6 +2429,21 @@ async function handleChatbotResponse(userId, userMessage) {
         console.error('[AI Bot Error] Lỗi Chatbot:', error.message);
     }
 }
+
+// Endpoint test nhanh kết nối Gemini AI
+app.get('/api/ai/test', async (req, res) => {
+    try {
+        const apiKey = process.env.GEMINI_API_KEY;
+        if (!apiKey) return res.status(400).json({ error: 'Thiếu API Key' });
+
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const result = await model.generateContent("Hãy chào tôi bằng tiếng Việt");
+        res.json({ message: 'Kết nối Gemini OK!', response: result.response.text() });
+    } catch (err) {
+        res.status(500).json({ error: 'Lỗi kết nối Gemini: ' + err.message });
+    }
+});
 
 // Gửi tin nhắn (Cả User và Admin dùng chung)
 app.post('/api/messages', async (req, res) => {
