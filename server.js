@@ -291,7 +291,7 @@ app.post('/api/google-login', async (req, res) => {
         await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS failed_reason TEXT;');
         await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS promo_code VARCHAR(50);');
         await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_fee NUMERIC DEFAULT 0;');
-        
+
         // Tạo bảng promo_codes
         await pool.query(`
             CREATE TABLE IF NOT EXISTS promo_codes (
@@ -361,7 +361,7 @@ app.delete('/api/promo-codes/:id', async (req, res) => {
 app.get('/api/promo-codes/validate', async (req, res) => {
     const { code, amount } = req.query;
     if (!code) return res.status(400).json({ error: 'Thiếu mã giảm giá' });
-    
+
     try {
         const result = await pool.query(
             'SELECT * FROM promo_codes WHERE code = $1 AND is_active = TRUE',
@@ -372,8 +372,8 @@ app.get('/api/promo-codes/validate', async (req, res) => {
         }
         const promo = result.rows[0];
         if (amount && parseFloat(amount) < parseFloat(promo.min_order_amount)) {
-            return res.status(400).json({ 
-                error: `Mã này chỉ áp dụng cho đơn hàng từ ${new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(promo.min_order_amount)} trở lên` 
+            return res.status(400).json({
+                error: `Mã này chỉ áp dụng cho đơn hàng từ ${new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(promo.min_order_amount)} trở lên`
             });
         }
         res.json(promo);
@@ -1456,7 +1456,7 @@ app.post('/api/orders/:id/cancel', async (req, res) => {
         }
 
         console.log(`🚫 [POST /api/orders/${id}/cancel] User ${userId} cancelled order. Reason: ${cancel_reason}`);
-        
+
         // Thông báo xác nhận cho người dùng
         let cancelOrderImage = null;
         try {
@@ -1878,7 +1878,7 @@ app.post('/api/marketing/discount/products', async (req, res) => {
             try {
                 const usersResult = await pool.query("SELECT id FROM users WHERE role NOT IN ('admin', 'shipper')");
                 console.log(`[Marketing] 📢 Đang gửi thông báo Sale cho ${usersResult.rowCount} khách hàng...`);
-                
+
                 const firstProduct = result.rows[0];
                 for (const user of usersResult.rows) {
                     await createNotification(
@@ -1935,7 +1935,7 @@ app.post('/api/marketing/discount/categories', async (req, res) => {
             try {
                 const usersResult = await pool.query("SELECT id FROM users WHERE role NOT IN ('admin', 'shipper')");
                 console.log(`[Marketing] 📢 Đang gửi thông báo Sale danh mục cho ${usersResult.rowCount} khách hàng...`);
-                
+
                 const firstProdInCat = result.rows[0];
                 for (const user of usersResult.rows) {
                     await createNotification(
@@ -2328,7 +2328,7 @@ async function handleChatbotResponse(userId, userMessage) {
     try {
         const apiKey = process.env.GEMINI_API_KEY;
         console.log(`[AI Bot] Bắt đầu xử lý cho User ${userId}. API Key: ${apiKey ? 'OK' : 'MISSING'}`);
-        
+
         if (!apiKey || apiKey === 'YOUR_GEMINI_API_KEY_HERE') {
             console.log('[AI Bot] Bỏ qua chatbot vì thiếu API Key trong .env');
             return;
@@ -2336,7 +2336,7 @@ async function handleChatbotResponse(userId, userMessage) {
 
         // Khởi tạo model
         const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
 
         // 1. Thu thập context của người dùng (Đơn hàng gần đây)
         const ordersRes = await pool.query(
@@ -2345,7 +2345,7 @@ async function handleChatbotResponse(userId, userMessage) {
         );
         let orderContext = "";
         if (ordersRes.rows.length > 0) {
-            orderContext = "\nĐơn hàng gần đây của khách:\n" + ordersRes.rows.map(o => 
+            orderContext = "\nĐơn hàng gần đây của khách:\n" + ordersRes.rows.map(o =>
                 `- Mã #${o.order_code}, Trạng thái: ${o.order_status}, Tổng: ${o.total_amount}đ`
             ).join('\n');
         }
@@ -2366,7 +2366,7 @@ async function handleChatbotResponse(userId, userMessage) {
             JOIN main_categories mc ON sc.main_category_id = mc.id
             ORDER BY p.discount_percent DESC, p.sold_quantity DESC LIMIT 20
         `);
-        const productContext = "\nDanh sách sản phẩm tiêu biểu:\n" + productsRes.rows.map(p => 
+        const productContext = "\nDanh sách sản phẩm tiêu biểu:\n" + productsRes.rows.map(p =>
             `[${p.cat_name}] ${p.name}: ${p.price}đ`
         ).join('\n');
 
@@ -2390,7 +2390,7 @@ async function handleChatbotResponse(userId, userMessage) {
         // 4. Gọi Gemini AI
         console.log('[AI Bot] Đang gọi Gemini API...');
         const result = await model.generateContent([systemPrompt, userMessage]);
-        
+
         if (!result || !result.response) {
             throw new Error('Gemini API returned an empty response');
         }
@@ -2437,7 +2437,7 @@ app.get('/api/ai/test', async (req, res) => {
         if (!apiKey) return res.status(400).json({ error: 'Thiếu API Key' });
 
         const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
         const result = await model.generateContent("Hãy chào tôi bằng tiếng Việt");
         res.json({ message: 'Kết nối Gemini OK!', response: result.response.text() });
     } catch (err) {
@@ -2454,7 +2454,7 @@ app.post('/api/messages', async (req, res) => {
             'INSERT INTO messages (sender_id, receiver_id, message, is_from_admin) VALUES ($1::integer, $2::integer, $3, $4) RETURNING *',
             [sender_id, receiver_id || null, message, is_from_admin || false]
         );
-        
+
         // Nếu là khách hàng gửi (không phải admin), kích hoạt chatbot trả lời tự động sau một chút
         if (!is_from_admin) {
             // Không chặn res.json, chatbot chạy ngầm
