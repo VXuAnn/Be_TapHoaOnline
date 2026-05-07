@@ -2237,7 +2237,7 @@ async function handleChatbotResponse(userId, userMessage) {
 
         // Khởi tạo model bên trong để đảm bảo lấy được API Key mới nhất
         const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
 
         // 1. Thu thập context của người dùng (Đơn hàng gần đây)
         const ordersRes = await pool.query(

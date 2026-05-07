@@ -13,7 +13,7 @@ async function testGemini() {
 
     try {
         const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+        const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
         
         console.log('Đang gửi tin nhắn thử nghiệm...');
         const result = await model.generateContent("Chào bạn, bạn có nghe thấy tôi không? Hãy trả lời ngắn gọn 'Kết nối thành công'.");
