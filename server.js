@@ -2436,12 +2436,16 @@ app.get('/api/ai/test', async (req, res) => {
         const apiKey = process.env.GEMINI_API_KEY;
         if (!apiKey) return res.status(400).json({ error: 'Thiếu API Key' });
 
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
-        const result = await model.generateContent("Hãy chào tôi bằng tiếng Việt");
-        res.json({ message: 'Kết nối Gemini OK!', response: result.response.text() });
+        // Dùng fetch thay vì SDK để lấy thẳng danh sách model mà API Key này được phép dùng
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+        const data = await response.json();
+        
+        res.json({ 
+            message: 'Đây là danh sách các model Gemini khả dụng cho API Key của bạn:', 
+            models: data.models ? data.models.map(m => m.name).filter(name => name.includes('gemini')) : data
+        });
     } catch (err) {
-        res.status(500).json({ error: 'Lỗi kết nối Gemini: ' + err.message });
+        res.status(500).json({ error: 'Lỗi lấy danh sách model: ' + err.message });
     }
 });
 
